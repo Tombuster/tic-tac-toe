@@ -1,21 +1,20 @@
 CC=gcc
-CFLAGS=-I.
+CFLAGS=-I. -D_GNU_SOURCE -Wall -Wextra
 SRC=src
-DST=bin
-LDLIBS=-lsctp
-#CFLAGS=                                                                        
+DST=.
 
-OBJECTS = server client
+all: $(DST)/server $(DST)/client
 
+$(DST)/server: $(SRC)/server.c $(SRC)/db.c | $(DST)
+	@echo "Compiling server"
+	$(CC) $(CFLAGS) -o $@ $(SRC)/server.c $(SRC)/db.c -lsctp -lpthread
 
-all: $(OBJECTS)
+$(DST)/client: $(SRC)/client.c | $(DST)
+	@echo "Compiling client"
+	$(CC) $(CFLAGS) -o $@ $(SRC)/client.c -lsctp
 
-$(OBJECTS):%:$(SRC)/%.c
-	@echo Compiling $<  to  $@
-	$(CC) -o $@ $< $(CFLAGS) $(LDLIBS)
-
-%.o: %.c $(DEPS)
-	$(CC) -c -o $@ $< $(CFLAGS) 
+$(DST):
+	mkdir -p $(DST)
 
 clean:
-	rm  $(OBJECTS)
+	rm -f $(DST)/server $(DST)/client

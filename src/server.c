@@ -16,8 +16,15 @@
 #include <syslog.h>
 #include <netinet/sctp.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include "db.h"
 
 #define LISTENQ 5
+
+struct game_args {
+    int connA;
+    int connB;
+};
 
 
 static void handle_game(int connA, int connB){
@@ -28,22 +35,28 @@ static void handle_game(int connA, int connB){
 
     fprintf(stderr, "[SRV] start: connA=%d connB=%d\n", connA, connB);
     
-    const char *welcome = "Twoja tura 8==>\n";
-    const char *wait    = "Polaczono, ALE CZEKAJ NA SWOJA TURE\n";
+    const char *welcome = "Twoja tura, Alice\n";
+    const char *wait    = "Polaczono, ALE CZEKAJ NA SWOJA TURE BOB\n";
 
 
     int wa = sctp_sendmsg(connA, welcome, strlen(welcome), NULL, 0, 0, 0, 0, 0, 0);
     int wb = sctp_sendmsg(connB, wait,    strlen(wait),    NULL, 0, 0, 0, 0, 0, 0);
     fprintf(stderr, "[SRV] welcome wa=%d wb=%d\n", wa, wb);
+
     for (;;) {
         int active, other;
+        char *active_nick, *other_nick;
         if (whose_turn == 0){
             active = connA;
+            active_nick = "Alice"; //testowy nick
             other = connB;
+            other_nick = "Bob"; //testowy nick
         }
         else{
             active = connB;
+            active_nick = "Bob";
             other = connA;
+            other_nick = "Alice";
         }
  
         flags = 0;
@@ -60,10 +73,25 @@ static void handle_game(int connA, int connB){
             continue;
  
         buf[n] = '\0';
+        
+        if (strcmp(buf, "wygralem\n\0") == 0){ //testowy blok
+            char msg[128];
+            char msg2[128];
+            snprintf(msg, sizeof(msg), "Gratulacje! Wygrales/as %s\n", active_nick);
+            int s = sctp_sendmsg(active, msg, 128, NULL, 0, 0, 0, 0, 0, 0);
+            snprintf(msg2,sizeof(msg2), "Gratulacje! Przegrales/as %s\n", other_nick);
+            int g = sctp_sendmsg(other, msg2, 128, NULL, 0, 0, 0, 0, 0, 0);
+            db_record_result(active_nick, other_nick, 3);
+            fprintf(stderr, "[SRV] koniec, zamykam %d i %d\n", connA, connB);
+            printf("alice points: %d\n", db_get_points("alice"));
+            printf("bob points:   %d\n", db_get_points("bob"));
+            close(connA);
+            close(connB);
+        }
         int s = sctp_sendmsg(other, buf, n, NULL, 0, 0, 0, 0, 0, 0);
         fprintf(stderr, "[SRV] fwd to fd=%d s=%d\n", other, s);            /* drugi sie rozlaczyl */
             
-        const char *go = "Twoja tura 8==>\n";
+        const char *go = "Twoja tura\n";
         sctp_sendmsg(other, go, strlen(go), NULL, 0, 0, 0, 0, 0, 0);
  
         whose_turn = !whose_turn;
@@ -74,12 +102,15 @@ static void handle_game(int connA, int connB){
 }
 
 
-// helper to kill kids :)
-static void child_handler(int sig){
-    pid_t pid;
-    int status;
+static void *game_thread(void *arg){
+    struct game_args *ga = (struct game_args *)arg;
+    int connA = ga->connA;
+    int connB = ga->connB;
+    free(ga);
 
-    while((pid = waitpid(-1, &status, WNOHANG)) > 0);
+    pthread_detach(pthread_self());
+    handle_game(connA, connB);
+    return NULL;
 }
 
 
@@ -96,16 +127,18 @@ main(int argc, char** argv){
     signal(SIGPIPE, SIG_IGN);
     //handle SIGCHLD
     struct sigaction sa;
-    sa.sa_handler = child_handler;
+    //sa.sa_handler = child_handler;
+
     sa.sa_flags = SA_RESTART;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGCHLD, &sa, NULL);
+    //sigaction(SIGCHLD, &sa, NULL);
 
     // Initialize listening socket
     int listenfd, connfd;
     struct sockaddr_in servaddr, cliaddr;
     socklen_t servlen, clilen;
     pid_t childpid;
+
     // sctp required variables
     char test_buff[1024];
     struct sctp_sndrcvinfo sndrcvinfo;
@@ -140,7 +173,7 @@ main(int argc, char** argv){
             return -1;
     }
     
-
+    db_init();
 
 
     int waiting_fd = -1;        /* connfd pierwszego klienta czekajacego na pare */
@@ -162,14 +195,24 @@ main(int argc, char** argv){
             sctp_sendmsg(connfd, msg, strlen(msg), NULL, 0, 0, 0, 0, 0, 0);
         } else {
             /* mamy pare -> fork i obsluga rozmowy */
-            pid_t pid = fork();
-            if (pid == 0) {
-                close(listenfd);
-                handle_game(waiting_fd, connfd);
-                exit(0);
+            struct game_args *ga = malloc(sizeof(*ga));
+            if (!ga){
+                close(waiting_fd);
+                close(connfd);
+                waiting_fd = -1;
+                continue;
             }
-            close(waiting_fd);
-            close(connfd);
+            ga->connA = waiting_fd;
+            ga->connB = connfd;
+
+            pthread_t tid;
+
+            if (pthread_create(&tid, NULL, game_thread, ga) != 0) {
+                syslog(LOG_ERR, "pthread_create() error : %s", strerror(errno));
+                close(waiting_fd);
+                close(connfd);
+                free(ga);
+            }
             waiting_fd = -1;
         }
     } 

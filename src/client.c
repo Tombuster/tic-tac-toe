@@ -77,7 +77,7 @@ main(int argc, char** argv){
         printf("%s", buf);
         fflush(stdout);
  
-        if (strstr(buf, "Twoja tura 8==>") != NULL) {
+        if (strstr(buf, "Twoja tura") != NULL) {
             printf("> ");
             fflush(stdout);
  
