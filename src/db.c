@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "db.h"
 #include <stdio.h>
 #include <stdlib.h>
