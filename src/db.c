@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stddef.h>
 
 #define MAX_USERS 32
 
@@ -121,6 +122,46 @@ int db_get_points(const char *nick){
     }
     pthread_mutex_unlock(&db_lock);
     return points;
+}
+
+void db_get_leaderboard(char *buff, size_t bufsize){
+    pthread_mutex_lock(&db_lock);
+    static struct user users[MAX_USERS];
+    int count = db_load(users, MAX_USERS);
+    if (count < 0) count = 0;
+
+
+    //sortowanie malejace
+    for (int i = 0; i < count - 1; i++){
+        for (int j = i + 1; j < count; j++){
+            if (users[j].points > users[i].points){
+                struct user t = users[i];
+                users[i] = users[j];
+                users[j] = t;
+            }
+        }
+    }
+    size_t off = 0;
+    int w = snprintf(buff, bufsize,
+        "\n === TABLICA WYNIKOW ===\n"
+        "%-3s %-16s %5s %5s %7s\n"
+        "----------------------------------------\n",
+        "#", "Nick", "W", "L", "Pkt"
+    );
+    if (w > 0 && (size_t)w < bufsize - off) off+=w;
+    for (int i = 0; i < count; i++){
+        w = snprintf(buff + off, bufsize - off,
+        "%-3d %-16s %5d %5d %7d\n",
+        i + 1, users[i].nick,
+        users[i].wins, users[i].losses, users[i].points);
+        if (w <= 0 || (size_t)w >= bufsize - off) break;  // bufor pelny -> stop
+        off+=w;
+    }
+
+    if (count == 0 && bufsize > off)
+        snprintf(buff + off, bufsize - off, "(brak wynikow)\n");
+
+    pthread_mutex_unlock(&db_lock);
 }
 
 

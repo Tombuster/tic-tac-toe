@@ -19,6 +19,11 @@
 
 #define LISTENQ 5
 
+static pthread_mutex_t lobby_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t lobby_cond = PTHREAD_COND_INITIALIZER;
+static int waiting_fd = -1; //fd gracza czekajacego
+static char waiting_name[64]; //nick
+
 struct game_args {
     int connA;
     int connB;
@@ -62,7 +67,7 @@ char check_winner(const char board[9]){
     return 'D'; //remis
 }
 
-static void handle_game(int connA, int connB){
+static void handle_game(int connA, int connB, char *nameA, char *nameB){
     char buf[1024];
     struct sctp_sndrcvinfo sri;
     int flags;
@@ -71,8 +76,8 @@ static void handle_game(int connA, int connB){
     memset(game_board, ' ', sizeof(game_board));
     fprintf(stderr, "[SRV] start: connA=%d connB=%d\n", connA, connB);
     
-    const char *welcome = "Polaczono, zaczynasz Alice, grasz X\n";
-    const char *wait    = "Polaczono, ALE CZEKAJ NA SWOJA TURE BOB, grasz O\n";
+    const char *welcome = "Polaczono, zaczynasz, grasz X\n";
+    const char *wait    = "Polaczono, ALE CZEKAJ NA SWOJA TURE, grasz O\n";
 
     format_board(game_board, buf, sizeof(buf));
     int wa = sctp_sendmsg(connA, welcome, strlen(welcome), NULL, 0, 0, 0, 0, 0, 0);
@@ -90,18 +95,18 @@ static void handle_game(int connA, int connB){
         char *active_nick, *other_nick, active_mark, other_mark;
         if (whose_turn == 0){
             active = connA;
-            active_nick = "Alice"; //testowy nick
+            active_nick = nameA; //testowy nick
             active_mark = 'X';
             other = connB;
-            other_nick = "Bob"; //testowy nick
+            other_nick = nameB; //testowy nick
             other_mark = 'O';
         }
         else{
             active = connB;
-            active_nick = "Bob";
+            active_nick = nameB;
             active_mark = 'O';
             other = connA;
-            other_nick = "Alice";
+            other_nick = nameA;
             other_mark = 'X';
         }
  
@@ -180,18 +185,122 @@ static void handle_game(int connA, int connB){
 
 
 
-static void *game_thread(void *arg){
-    struct game_args *ga = (struct game_args *)arg;
-    int connA = ga->connA;
-    int connB = ga->connB;
-    free(ga);
+//static void *game_thread(void *arg){
+ //   struct game_args *ga = (struct game_args *)arg;
+ //   int connA = ga->connA;
+ //   int connB = ga->connB;
+//    free(ga);
+//
+//    pthread_detach(pthread_self());
+//    handle_game(connA, connB);
+//    return NULL;
+//}
 
+
+
+struct lobby_args { int connfd ;};
+
+static void *lobby_thread(void *arg){
+    struct lobby_args *la = (struct lobby_args *)arg;
+    int connfd = la->connfd;
+    free(la);
     pthread_detach(pthread_self());
-    handle_game(connA, connB);
-    return NULL;
+
+    char buf[1024];
+    struct sctp_sndrcvinfo sri;
+    int flags;
+    char name[64] = "Anonymous";
+
+    const char *menu =
+    "\n=== POCZEKALNIA ===\n"
+    "NAME <nick> - ustaw nick\n"
+    "SCORES      - Tablica wynikow\n"
+    "SCORE <nick>- Ilosc punktow gracza\n"
+    "PLAY        - graj\n"
+    "QUIT        - wyjdz\n";
+    sctp_sendmsg(connfd, menu, strlen(menu), NULL, 0, 0, 0, 0, 0, 0); 
+
+
+    //obslugiwanie klienta
+    for ( ; ; ){
+        flags = 0;
+        int n = sctp_recvmsg(connfd, buf, sizeof(buf) -1,NULL,NULL, &sri,&flags);
+        if (n<=0) {close(connfd); return NULL; }//rozlaczenie
+        if (flags & MSG_NOTIFICATION) continue;
+        buf[n] = '\0';
+        buf[strcspn(buf, "\r\n")] = '\0';
+
+
+        if (strncmp(buf, "NAME ",5) == 0){
+            strncpy(name, buf+5, sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            char m[96];
+            snprintf(m, sizeof(m), "Nick Ustawiony: %s\n> ", name);
+            sctp_sendmsg(connfd, m, strlen(m) ,NULL, 0, 0, 0, 0, 0, 0);
+        }
+        else if(strncmp(buf, "SCORES",6) == 0){
+            char scores[1024];
+            db_get_leaderboard(scores, sizeof(scores));
+            sctp_sendmsg(connfd, scores, strlen(scores), NULL, 0, 0, 0, 0, 0, 0); 
+            char m[4];
+            snprintf(m, sizeof(m), "\n> ");
+            sctp_sendmsg(connfd, m, strlen(m) ,NULL, 0, 0, 0, 0, 0, 0);
+        } 
+        else if (strncmp(buf, "SCORE ", 6) == 0){
+            char query[64];
+            strncpy(query, buf+6, sizeof(query) - 1);   // buf+6, osobny bufor
+            query[sizeof(query) - 1] = '\0';
+            int points = db_get_points(query);
+            char m[128];
+            if (points < 0)
+                snprintf(m, sizeof(m), "Gracz %s nieznany\n> ", query);
+            else
+                snprintf(m, sizeof(m), "Gracz %s ma %d punktow\n> ", query, points);
+            sctp_sendmsg(connfd, m, strlen(m), NULL, 0, 0, 0, 0, 0, 0);
+        }
+        else if (strncmp(buf, "PLAY", 4) == 0){
+            break;
+        }
+        else if (strncmp(buf, "QUIT", 4)==0){
+            close(connfd);
+            return NULL;
+        }
+        else {
+            char m[100];
+            snprintf(m, sizeof(m), "Nieznana komenda\n> ");
+            sctp_sendmsg(connfd, m, strlen(m) ,NULL, 0, 0, 0, 0, 0, 0);
+        }
+    }
+        // faza parowania
+    char m[100];
+    snprintf(m, sizeof(m), "Szukam przeciwnika...\n> ");
+    sctp_sendmsg(connfd, m, strlen(m) ,NULL, 0, 0, 0, 0, 0, 0);
+
+    pthread_mutex_lock(&lobby_mtx);
+    if (waiting_fd < 0){ //jestem pierwszy, czekam
+        waiting_fd = connfd;
+        strncpy(waiting_name, name, sizeof(waiting_name)-1);
+        waiting_name[sizeof(waiting_name)-1] = '\0';
+
+        while(waiting_fd == connfd){
+            pthread_cond_wait(&lobby_cond, &lobby_mtx);
+        }
+        pthread_mutex_unlock(&lobby_mtx);
+
+        return NULL;
+    }
+    else {
+        int connA = waiting_fd;
+        int connB = connfd;
+        waiting_fd = -1;
+        pthread_cond_broadcast(&lobby_cond);
+        pthread_mutex_unlock(&lobby_mtx);
+
+        handle_game(connA, connB, waiting_name, name);
+        return NULL;
+    }
+    
 }
-
-
 
  
 int
@@ -254,38 +363,24 @@ main(int argc, char** argv){
         connfd = accept(listenfd, (struct sockaddr *)&cliaddr, &clilen);
         if (connfd < 0) {
             if (errno == EINTR)
-                continue;       /* przerwane przez SIGCHLD -> ponow */
+                continue;      
             syslog(LOG_ERR, "accept() error : %s", strerror(errno));
             continue;
         }
  
-        if (waiting_fd < 0) {
-            /* pierwszy z pary -> czeka */
-            waiting_fd = connfd;
-            const char *msg = "Czekam na drugiego gracza...\n";
-            sctp_sendmsg(connfd, msg, strlen(msg), NULL, 0, 0, 0, 0, 0, 0);
-        } else {
-            /* mamy pare -> fork i obsluga rozmowy */
-            struct game_args *ga = malloc(sizeof(*ga));
-            if (!ga){
-                close(waiting_fd);
-                close(connfd);
-                waiting_fd = -1;
-                continue;
-            }
-            ga->connA = waiting_fd;
-            ga->connB = connfd;
+        struct lobby_args *la = malloc(sizeof(*la));
+        if (!la) {close(connfd); continue;}
+        la->connfd = connfd;
 
-            pthread_t tid;
+        pthread_t tid;
 
-            if (pthread_create(&tid, NULL, game_thread, ga) != 0) {
-                syslog(LOG_ERR, "pthread_create() error : %s", strerror(errno));
-                close(waiting_fd);
-                close(connfd);
-                free(ga);
-            }
-            waiting_fd = -1;
+        if (pthread_create(&tid, NULL, lobby_thread, la) != 0) {
+            syslog(LOG_ERR, "pthread_create() error : %s", strerror(errno));
+            close(waiting_fd);
+            close(connfd);
+            free(la);
         }
+        
     } 
     
 }

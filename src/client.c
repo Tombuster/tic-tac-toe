@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -32,7 +30,7 @@ main(int argc, char** argv){
     // Initialize socket
     int sockfd;
     struct sockaddr_in servaddr;
-    socklen_t servaddrlen = sizeof(servaddr);
+    //socklen_t servaddrlen = sizeof(servaddr);
 
     if(( sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)) < 0){
         perror("socket() error");
@@ -60,8 +58,27 @@ main(int argc, char** argv){
 		return 1;
 	}
     
-    
-        // TODO: Handle game logic
+    int in_lobby = 1;
+    while(in_lobby){
+        flags = 0;
+        int n = sctp_recvmsg(sockfd, buf, sizeof(buf)-1, NULL, NULL, &sri, &flags);
+        if (n <= 0) { printf("Polaczenie zakonczone.\n"); exit(0); }
+        if (flags & MSG_NOTIFICATION) continue;
+        buf[n] = '\0';
+        printf("%s", buf);
+        fflush(stdout);
+
+        if (strstr(buf, "Szukam przeciwnika") != NULL) {
+            in_lobby = 0;
+            break;
+        }
+
+        if (fgets(buf, sizeof(buf), stdin) == NULL) exit(0);
+        if (sctp_sendmsg(sockfd, buf, strlen(buf), NULL, 0, 0, 0, 0, 0, 0) < 0) {
+            perror("sctp_sendmsg() error");
+            exit(0);
+        }
+    }
     for (;;) {
         flags = 0;
         int n = sctp_recvmsg(sockfd, buf, sizeof(buf) - 1,
